@@ -12,6 +12,10 @@
       {
         "command": "claudeUsage.refresh",
         "title": "Claude Usage: Refresh 5h/week"
+      },
+      {
+        "command": "claudeUsage.openLog",
+        "title": "Claude Usage: Open History"
       }
     ]
   },

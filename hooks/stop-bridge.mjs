@@ -3,7 +3,7 @@
 // Reads JSON from stdin ({session_id, cwd, transcript_path}),
 // writes per-session usage.json under ~/.claude/projects/<slug>/.
 
-import { readFileSync, writeFileSync, mkdirSync, createReadStream } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -19,6 +19,7 @@ const DEFAULT_LIMIT = 200_000;
 const USAGE_ENDPOINT = 'https://api.anthropic.com/api/oauth/usage';
 const CACHE_FILE = join(homedir(), '.claude', 'oauth-usage-cache.json');
 const CACHE_TTL_MS = 90 * 1000;
+const HISTORY_FILE = join(homedir(), '.claude', 'usage-history.jsonl');
 
 async function readStdin() {
   let data = '';
@@ -129,6 +130,13 @@ function writeJson(path, obj) {
   writeFileSync(path, JSON.stringify(obj));
 }
 
+function appendHistory(entry) {
+  try {
+    mkdirSync(dirname(HISTORY_FILE), { recursive: true });
+    appendFileSync(HISTORY_FILE, JSON.stringify(entry) + '\n');
+  } catch {}
+}
+
 async function main() {
   const raw = await readStdin();
   let input = {};
@@ -145,13 +153,15 @@ async function main() {
   const isUserPromptSubmit = 'prompt' in input;
   const existing = out ? readExisting(out) : null;
 
-  let ctx;
+  let ctx, model;
   if (isUserPromptSubmit) {
     ctx = existing?.context_percent ?? 0;
+    model = existing?.model ?? null;
   } else {
-    const { tokens, model } = transcript ? await lastUsageAndModel(transcript) : { tokens: 0, model: null };
+    const result = transcript ? await lastUsageAndModel(transcript) : { tokens: 0, model: null };
+    model = result.model;
     const limit = MODEL_LIMITS[model] ?? DEFAULT_LIMIT;
-    ctx = Math.floor((tokens * 100) / limit);
+    ctx = Math.floor((result.tokens * 100) / limit);
   }
 
   const limits =
@@ -171,9 +181,24 @@ async function main() {
   if (out) {
     writeJson(out, {
       context_percent: ctx,
+      model: model ?? existing?.model ?? null,
       ...limits,
       session_id: sid,
       updated_at: new Date().toISOString()
+    });
+  }
+
+  if (sid) {
+    appendHistory({
+      ts: new Date().toISOString(),
+      type: isUserPromptSubmit ? 'submit' : 'stop',
+      sid,
+      model: model ?? existing?.model ?? null,
+      ctx,
+      h: limits.five_hour_percent,
+      w: limits.seven_day_percent,
+      h_reset: limits.five_hour_resets_at,
+      w_reset: limits.seven_day_resets_at
     });
   }
 }

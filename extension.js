@@ -5,6 +5,9 @@ const os = require('os');
 const { spawn } = require('child_process');
 
 const LOG_SCAN_INTERVAL_MS = 2000;
+const HISTORY_FILE = path.join(os.homedir(), '.claude', 'usage-history.jsonl');
+const SESSION_TITLES_FILE = path.join(os.homedir(), '.claude', 'session-titles.json');
+const REFRESH_SCRIPT = path.join(os.homedir(), 'Projects', 'claude-usage-indicator', 'hooks', 'refresh-usage.mjs');
 
 function slugify(p) {
   return p.replace(/[^A-Za-z0-9]/g, '-');
@@ -69,15 +72,12 @@ function listUsageFiles(dir) {
 
 function isClaudeInput(input) {
   if (!input || typeof input !== 'object') return false;
-  // TabInputWebview: viewType is usually "mainThreadWebview-<id>".
-  // TabInputCustom: viewType = custom editor id. Match by 'claude' substring.
   const vt = input.viewType;
   if (typeof vt === 'string' && vt.toLowerCase().includes('claude')) return true;
   return false;
 }
 
 function activeClaudeTab(output) {
-  // First look for the active tab in the active group — the one actually in focus.
   for (const group of vscode.window.tabGroups.all) {
     if (!group.isActive) continue;
     for (const tab of group.tabs) {
@@ -85,8 +85,6 @@ function activeClaudeTab(output) {
       if (isClaudeInput(tab.input)) return tab;
     }
   }
-  // Fallback: the only Claude tab across all groups. Useful when focus is on a code
-  // editor but we care about the open Claude session.
   const claudeTabs = [];
   for (const group of vscode.window.tabGroups.all) {
     for (const tab of group.tabs) {
@@ -94,10 +92,8 @@ function activeClaudeTab(output) {
     }
   }
   if (claudeTabs.length === 1) return claudeTabs[0];
-  // Multiple Claude tabs: if one is active in some group, use it.
   for (const tab of claudeTabs) if (tab.isActive) return tab;
   if (output && claudeTabs.length === 0) {
-    // Dump all tabs once to see real viewTypes.
     if (!activeClaudeTab._dumped) {
       activeClaudeTab._dumped = true;
       for (const group of vscode.window.tabGroups.all) {
@@ -112,9 +108,6 @@ function activeClaudeTab(output) {
 }
 
 function findClaudeLogFile(output) {
-  // ~/.config/Code/logs/<timestamp>/window*/exthost/Anthropic.claude-code/Claude VSCode.log
-  // Many timestamp dirs may only contain cli.log (when VS Code was launched from CLI)
-  // — skip those and find the one that actually has the Claude extension log.
   const logsRoot = path.join(os.homedir(), '.config', 'Code', 'logs');
   if (!fs.existsSync(logsRoot)) return null;
   let candidates = [];
@@ -139,9 +132,7 @@ function findClaudeLogFile(output) {
       try {
         const st = fs.statSync(logPath);
         candidates.push({ path: logPath, mtime: st.mtimeMs });
-      } catch {
-        // no Claude log in this window
-      }
+      } catch {}
     }
   }
   if (!candidates.length) {
@@ -161,6 +152,7 @@ class TitleMap {
     this.logFile = null;
     this.logOffset = 0;
     this.timer = null;
+    this.onNewTitle = null; // callback(sid, title)
   }
 
   start() {
@@ -175,13 +167,11 @@ class TitleMap {
     const found = findClaudeLogFile(this.output);
     if (!found) return;
     this.logFile = found;
-    // Start from the end of the file to avoid retroactively parsing a huge log
     try {
       this.logOffset = fs.statSync(this.logFile).size;
     } catch {
       this.logOffset = 0;
     }
-    // Also scan the tail (~last 200 KB) right away — may contain recent titles
     this.scanTail(200 * 1024);
   }
 
@@ -209,10 +199,7 @@ class TitleMap {
     if (!this.logFile) return;
     try {
       const size = fs.statSync(this.logFile).size;
-      if (size < this.logOffset) {
-        // log was rotated
-        this.logOffset = 0;
-      }
+      if (size < this.logOffset) this.logOffset = 0;
       if (size === this.logOffset) return;
       const fd = fs.openSync(this.logFile, 'r');
       const len = size - this.logOffset;
@@ -227,7 +214,6 @@ class TitleMap {
   }
 
   parseChunk(text) {
-    // Look for: "sessionId":"UUID", ... "title":"..." in a single JSON payload
     const re = /"sessionId"\s*:\s*"([0-9a-f-]{36})"[^{}]*?"title"\s*:\s*"((?:\\.|[^"\\])*)"/g;
     let m;
     while ((m = re.exec(text)) !== null) {
@@ -240,16 +226,15 @@ class TitleMap {
       this.sessionToTitle.set(sid, title);
       this.titleToSession.set(title, sid);
       this.output?.appendLine(`[map] ${sid} <- "${title}"`);
+      this.onNewTitle?.(sid, title);
     }
   }
 
   sessionForTitle(title) {
     if (!title) return null;
-    // Try full title, then strip possible "Claude — " prefix
     if (this.titleToSession.has(title)) return this.titleToSession.get(title);
     const stripped = title.replace(/^Claude[\s—:-]+/, '').trim();
     if (this.titleToSession.has(stripped)) return this.titleToSession.get(stripped);
-    // fuzzy: find a key that is a suffix/prefix of the label
     for (const [t, sid] of this.titleToSession.entries()) {
       if (title.includes(t) || t.includes(title)) return sid;
     }
@@ -269,8 +254,6 @@ function formatRemaining(isoStr) {
 }
 
 function render(sessionData, limitsData) {
-  // S comes from the active session data (context_percent — per-session),
-  // 5h/weekly from the freshest usage file: account-wide limits, need latest values.
   const src = sessionData || limitsData;
   if (!src) return 'Claude: —';
   const s = src.context_percent ?? '?';
@@ -282,6 +265,29 @@ function render(sessionData, limitsData) {
   return `S: ${s}% · ${fiveLabel}: ${h}% · w: ${w}%`;
 }
 
+function loadSessionTitles() {
+  try { return JSON.parse(fs.readFileSync(SESSION_TITLES_FILE, 'utf8')); } catch { return {}; }
+}
+
+function saveSessionTitles(titles) {
+  try {
+    fs.mkdirSync(path.dirname(SESSION_TITLES_FILE), { recursive: true });
+    fs.writeFileSync(SESSION_TITLES_FILE, JSON.stringify(titles));
+  } catch {}
+}
+
+function readHistory() {
+  try {
+    return fs.readFileSync(HISTORY_FILE, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => { try { return JSON.parse(line); } catch { return null; } })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 function activate(context) {
   const output = vscode.window.createOutputChannel('Claude Usage Indicator');
   context.subscriptions.push(output);
@@ -290,11 +296,20 @@ function activate(context) {
     vscode.StatusBarAlignment.Right,
     100
   );
-  item.command = 'claudeUsage.refresh';
-  item.tooltip = 'S = context · 5h = 5-hour limit · w = weekly limit. Click to refresh 5h/w.';
+  item.command = 'claudeUsage.openLog';
+  item.tooltip = 'S = context · 5h = 5-hour limit · w = weekly. Click to open history.';
   context.subscriptions.push(item);
 
   const titleMap = new TitleMap(output);
+  let sessionTitles = loadSessionTitles();
+
+  titleMap.onNewTitle = (sid, title) => {
+    if (sessionTitles[sid] !== title) {
+      sessionTitles[sid] = title;
+      saveSessionTitles(sessionTitles);
+    }
+  };
+
   titleMap.start();
   context.subscriptions.push({ dispose: () => titleMap.stop() });
 
@@ -365,39 +380,116 @@ function activate(context) {
     }
   }
 
+  // Watch history file to live-update the log panel
+  try {
+    const claudeDir = path.join(os.homedir(), '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    const hw = fs.watch(claudeDir, (_ev, filename) => {
+      if (filename === 'usage-history.jsonl') sendLogUpdate();
+    });
+    context.subscriptions.push({ dispose: () => hw.close() });
+  } catch (e) {
+    output.appendLine(`[watch-history] ${e.message}`);
+  }
+
+  function doRefresh() {
+    const ws = workspaceForActiveTab();
+    const dir = projectDir(ws);
+    if (!dir || !currentSessionId) {
+      vscode.window.setStatusBarMessage('Claude: no active session to refresh', 2000);
+      return;
+    }
+    const bp = path.join(dir, `usage-${currentSessionId}.json`);
+    const child = spawn('node', [REFRESH_SCRIPT, bp], { detached: true, stdio: 'ignore' });
+    child.on('error', (e) => vscode.window.showErrorMessage(`Claude refresh failed: ${e.message}`));
+    child.unref();
+    vscode.window.setStatusBarMessage('Claude usage: refreshing…', 2000);
+  }
+
   context.subscriptions.push(
     vscode.window.tabGroups.onDidChangeTabs(update),
     vscode.window.tabGroups.onDidChangeTabGroups(update),
     vscode.window.onDidChangeActiveTextEditor(update),
     vscode.workspace.onDidChangeWorkspaceFolders(update),
-    vscode.commands.registerCommand('claudeUsage.refresh', () => {
-      const ws = workspaceForActiveTab();
-      const dir = projectDir(ws);
-      if (!dir || !currentSessionId) {
-        vscode.window.setStatusBarMessage('Claude: nothing to refresh', 2000);
-        return;
+
+    vscode.commands.registerCommand('claudeUsage.refresh', doRefresh),
+
+    vscode.commands.registerCommand('claudeUsage.openLog', () => {
+      const entries = readHistory();
+
+      function fmtTime(ts) {
+        const d = new Date(ts);
+        return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' +
+               d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       }
-      const bp = path.join(dir, `usage-${currentSessionId}.json`);
-      const script = path.join(
-        os.homedir(),
-        'Projects',
-        'claude-usage-indicator',
-        'hooks',
-        'refresh-usage.mjs'
-      );
-      const child = spawn('node', [script, bp], {
-        detached: true,
-        stdio: 'ignore'
+
+      const actionItems = [
+        { label: '$(refresh) Refresh', description: 'Update 5h/weekly limits from API', action: 'refresh' },
+        { label: '$(file) Open history file', description: HISTORY_FILE, action: 'open' },
+        { label: '$(clippy) Export CSV', description: 'Copy history to clipboard', action: 'export' },
+        { label: '$(trash) Clear log', description: 'Delete all history', action: 'delete' },
+      ];
+
+      const histSeparator = { label: 'History', kind: vscode.QuickPickItemKind.Separator };
+
+      const histItems = [];
+      if (entries.length === 0) {
+        histItems.push({ label: 'No history yet', description: 'Start a Claude session', action: null });
+      } else {
+        for (const e of [...entries].reverse().slice(0, 200)) {
+          const title = sessionTitles[e.sid] || e.sid.slice(0, 8);
+          const badge = e.type === 'submit' ? '→' : '✓';
+          histItems.push({
+            label: `${fmtTime(e.ts)}  ${badge}  ${title}`,
+            description: `S:${e.ctx}% · 5h:${e.h}% · w:${e.w}%  ${e.model || ''}`,
+            action: null
+          });
+        }
+      }
+
+      const qp = vscode.window.createQuickPick();
+      qp.title = item.text || 'Claude Usage';
+      qp.placeholder = 'Select an action';
+      qp.items = [...actionItems, histSeparator, ...histItems];
+      qp.matchOnDescription = false;
+
+      qp.onDidChangeSelection(([selected]) => {
+        if (!selected || !selected.action) return;
+        qp.hide();
+        if (selected.action === 'refresh') {
+          doRefresh();
+        } else if (selected.action === 'open') {
+          vscode.workspace.openTextDocument(vscode.Uri.file(HISTORY_FILE)).then((doc) =>
+            vscode.window.showTextDocument(doc)
+          ).then(undefined, () =>
+            vscode.window.showErrorMessage('No history file yet — start a Claude session first.')
+          );
+        } else if (selected.action === 'export') {
+          const lines = entries.map((e) => [
+            e.ts, e.type, e.sid,
+            (sessionTitles[e.sid] || '').replace(/,/g, ' '),
+            (e.model || '').replace(/,/g, ' '),
+            e.ctx, e.h, e.w, e.h_reset, e.w_reset
+          ].join(','));
+          const csv = 'timestamp,type,session_id,title,model,ctx%,5h%,7d%,5h_reset,7d_reset\n' + lines.join('\n');
+          vscode.env.clipboard.writeText(csv).then(() =>
+            vscode.window.setStatusBarMessage('History copied to clipboard', 3000)
+          );
+        } else if (selected.action === 'delete') {
+          vscode.window.showWarningMessage('Delete all Claude usage history?', 'Delete', 'Cancel').then((ans) => {
+            if (ans === 'Delete') {
+              try { fs.unlinkSync(HISTORY_FILE); } catch {}
+              vscode.window.setStatusBarMessage('History deleted', 2000);
+            }
+          });
+        }
       });
-      child.on('error', (e) =>
-        vscode.window.showErrorMessage(`Claude refresh failed: ${e.message}`)
-      );
-      child.unref();
-      vscode.window.setStatusBarMessage('Claude usage: refreshing…', 2000);
+
+      qp.onDidHide(() => qp.dispose());
+      qp.show();
     })
   );
 
-  // periodic update in case the log caught up but no tab change fired
   const pollTimer = setInterval(update, 2500);
   context.subscriptions.push({ dispose: () => clearInterval(pollTimer) });
 
