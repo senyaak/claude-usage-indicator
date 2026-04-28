@@ -2,7 +2,7 @@
   "name": "claude-usage-indicator",
   "displayName": "Claude Usage Indicator",
   "description": "Status bar: context % + 5h + weekly limits for the active Claude chat",
-  "version": "0.0.9",
+  "version": "0.0.10",
   "publisher": "local",
   "engines": { "vscode": "^1.70.0" },
   "main": "./extension.js",

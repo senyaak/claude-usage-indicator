@@ -253,16 +253,17 @@ function formatRemaining(isoStr) {
   return `${m}m`;
 }
 
+function fmtPct(value) {
+  return value == null || value === 0 ? '_' : `${value}%`;
+}
+
 function render(sessionData, limitsData) {
   const src = sessionData || limitsData;
   if (!src) return 'Claude: —';
-  const s = src.context_percent ?? '?';
   const limits = limitsData || sessionData || {};
-  const h = limits.five_hour_percent ?? '?';
-  const w = limits.seven_day_percent ?? '?';
   const fiveLeft = formatRemaining(limits.five_hour_resets_at);
   const fiveLabel = fiveLeft || '5h';
-  return `S: ${s}% · ${fiveLabel}: ${h}% · w: ${w}%`;
+  return `S: ${fmtPct(src.context_percent)} · ${fiveLabel}: ${fmtPct(limits.five_hour_percent)} · w: ${fmtPct(limits.seven_day_percent)}`;
 }
 
 function loadSessionTitles() {
@@ -441,7 +442,7 @@ function activate(context) {
           const badge = e.type === 'submit' ? '→' : '✓';
           histItems.push({
             label: `${fmtTime(e.ts)}  ${badge}  ${title}`,
-            description: `S:${e.ctx}% · 5h:${e.h}% · w:${e.w}%  ${e.model || ''}`,
+            description: `S:${fmtPct(e.ctx)} · 5h:${fmtPct(e.h)} · w:${fmtPct(e.w)}  ${e.model || ''}`,
             action: null
           });
         }

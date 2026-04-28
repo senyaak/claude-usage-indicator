@@ -69,21 +69,23 @@ function limitsFromExisting(prev) {
 async function lastUsageAndModel(transcriptPath) {
   try {
     const rl = createInterface({ input: createReadStream(transcriptPath) });
-    let lastUsageLine = null;
+    let lastUsage = null;
     let lastModel = null;
     for await (const line of rl) {
-      if (line.includes('"model"')) {
-        try { lastModel = JSON.parse(line)?.message?.model ?? lastModel; } catch {}
+      if (!line.includes('"usage"') && !line.includes('"model"')) continue;
+      let obj;
+      try { obj = JSON.parse(line); } catch { continue; }
+      const m = obj?.message?.model;
+      if (m) lastModel = m;
+      const u = obj?.message?.usage ?? obj?.usage;
+      if (u && typeof u === 'object') {
+        const tokens = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+        if (tokens > 0) lastUsage = { tokens, model: m ?? lastModel };
       }
-      if (line.includes('"usage"')) lastUsageLine = line;
     }
-    if (!lastUsageLine) return { tokens: 0, model: lastModel };
-    const obj = JSON.parse(lastUsageLine);
-    const u = obj.message?.usage ?? obj.usage ?? {};
-    const tokens = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
-    return { tokens, model: obj.message?.model ?? lastModel };
+    return { usage: lastUsage, model: lastModel };
   } catch {
-    return { tokens: 0, model: null };
+    return { usage: null, model: null };
   }
 }
 
@@ -153,15 +155,16 @@ async function main() {
   const isUserPromptSubmit = 'prompt' in input;
   const existing = out ? readExisting(out) : null;
 
-  let ctx, model;
-  if (isUserPromptSubmit) {
-    ctx = existing?.context_percent ?? 0;
-    model = existing?.model ?? null;
-  } else {
-    const result = transcript ? await lastUsageAndModel(transcript) : { tokens: 0, model: null };
-    model = result.model;
+  // Always read transcript when available — UserPromptSubmit can use the previous
+  // assistant turn's usage to keep S accurate even if Stop never fires.
+  const result = transcript ? await lastUsageAndModel(transcript) : { usage: null, model: null };
+  const model = result.usage?.model ?? result.model ?? existing?.model ?? null;
+  let ctx;
+  if (result.usage) {
     const limit = MODEL_LIMITS[model] ?? DEFAULT_LIMIT;
-    ctx = Math.floor((result.tokens * 100) / limit);
+    ctx = Math.floor((result.usage.tokens * 100) / limit);
+  } else {
+    ctx = existing?.context_percent ?? null;
   }
 
   const limits =
@@ -181,7 +184,7 @@ async function main() {
   if (out) {
     writeJson(out, {
       context_percent: ctx,
-      model: model ?? existing?.model ?? null,
+      model,
       ...limits,
       session_id: sid,
       updated_at: new Date().toISOString()
@@ -193,7 +196,7 @@ async function main() {
       ts: new Date().toISOString(),
       type: isUserPromptSubmit ? 'submit' : 'stop',
       sid,
-      model: model ?? existing?.model ?? null,
+      model,
       ctx,
       h: limits.five_hour_percent,
       w: limits.seven_day_percent,
