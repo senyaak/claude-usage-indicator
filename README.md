@@ -8,9 +8,38 @@ S: 12% · 2:47: 34% · w: 8%
 
 - 🧠 **S** — context window used (input + cache tokens vs. model limit).
 - ⏳ **2:47** — time until the 5-hour limit resets, followed by current 5h utilization.
-- 📅 **w** — weekly (7-day) utilization.
+- 📅 **w** — weekly (7-day) utilization (the highest of the per-model weekly buckets).
 
 🖱️ Click the status bar item to open the **usage history popup**.
+
+## 🎨 Custom format
+
+The status bar string is configurable via the `claudeUsage.format` setting. The default reproduces the layout above:
+
+```
+S: %S% · %5hr%: %5h% · w: %w%
+```
+
+Tokens (wrapped in `%…%`):
+
+| Token | Meaning |
+|---|---|
+| `%S%` / `%SP%` | session context % |
+| `%ST%` | session context tokens (e.g. `258k`) |
+| `%5h%` | 5-hour utilization % |
+| `%5hr%` | countdown until the 5-hour limit resets (e.g. `2:47`) |
+| `%w%` | weekly % (max across buckets) |
+| `%wr%` | countdown until the weekly limit resets |
+| `%wS%` | weekly Sonnet % |
+| `%wO%` | weekly Opus % |
+
+Unknown tokens are left untouched so typos stay visible. Percentages and token counts render as `_` when zero/unavailable. Examples:
+
+```
+%ST%                          →  258k
+SP: %SP% (%ST%) · w: %w%      →  SP: 25% (258k) · w: 47%
+%S%                           →  25%
+```
 
 ## 📋 History popup
 
