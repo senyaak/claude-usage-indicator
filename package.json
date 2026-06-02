@@ -17,7 +17,17 @@
         "command": "claudeUsage.openLog",
         "title": "Claude Usage: Open History"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Claude Usage Indicator",
+      "properties": {
+        "claudeUsage.format": {
+          "type": "string",
+          "default": "S: %S% · %5hr%: %5h% · w: %w%",
+          "markdownDescription": "Status bar format. Tokens (wrapped in `%…%`): `%S%`/`%SP%` session context %, `%ST%` session context tokens (e.g. `258k`), `%5h%` 5-hour usage, `%5hr%` 5-hour reset countdown, `%w%` weekly (max bucket), `%wr%` weekly reset countdown, `%wS%` weekly Sonnet, `%wO%` weekly Opus. Unknown tokens are left as-is. Example — tokens only: `%ST%`."
+        }
+      }
+    }
   },
   "scripts": {
     "install": "node scripts/install.mjs",

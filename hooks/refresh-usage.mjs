@@ -31,12 +31,39 @@ function writeCache(limits) {
   } catch {}
 }
 
+// The weekly limit is now reported across several buckets
+// (seven_day, seven_day_opus, seven_day_sonnet, …). The figure the user
+// actually hits first is the highest of them, so take the max and use that
+// bucket's reset time (falling back to the overall seven_day reset).
+function pickWeekly(body) {
+  if (!body || typeof body !== 'object') return { percent: 0, resets_at: '' };
+  let percent = 0;
+  let resets_at = body?.seven_day?.resets_at ?? '';
+  for (const [key, val] of Object.entries(body)) {
+    if (!key.startsWith('seven_day')) continue;
+    const u = val && typeof val === 'object' ? val.utilization : null;
+    if (typeof u === 'number' && u > percent) {
+      percent = u;
+      resets_at = val.resets_at ?? resets_at;
+    }
+  }
+  return { percent: Math.floor(percent), resets_at };
+}
+
+function bucketPct(body, key) {
+  const u = body?.[key]?.utilization;
+  return typeof u === 'number' ? Math.floor(u) : 0;
+}
+
 function pickLimits(body) {
+  const weekly = pickWeekly(body);
   return {
     five_hour_percent: Math.floor(body?.five_hour?.utilization ?? 0),
-    seven_day_percent: Math.floor(body?.seven_day?.utilization ?? 0),
+    seven_day_percent: weekly.percent,
+    seven_day_sonnet_percent: bucketPct(body, 'seven_day_sonnet'),
+    seven_day_opus_percent: bucketPct(body, 'seven_day_opus'),
     five_hour_resets_at: body?.five_hour?.resets_at ?? '',
-    seven_day_resets_at: body?.seven_day?.resets_at ?? ''
+    seven_day_resets_at: weekly.resets_at
   };
 }
 
@@ -83,6 +110,7 @@ async function main() {
   const limits = await getLimits();
   const out = {
     context_percent: prev.context_percent ?? 0,
+    context_tokens: prev.context_tokens ?? 0,
     ...limits,
     session_id: prev.session_id ?? '',
     updated_at: new Date().toISOString()

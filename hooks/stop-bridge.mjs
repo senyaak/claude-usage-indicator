@@ -9,6 +9,7 @@ import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 
 const MODEL_LIMITS = {
+  'claude-opus-4-8': 1_000_000,
   'claude-opus-4-7': 1_000_000,
   'claude-opus-4-5': 200_000,
   'claude-sonnet-4-6': 200_000,
@@ -16,6 +17,15 @@ const MODEL_LIMITS = {
   'claude-haiku-4-5': 200_000,
 };
 const DEFAULT_LIMIT = 200_000;
+
+// Recent Opus models use the 1M context window here; fall back to that for
+// future opus-* releases so a model bump doesn't overflow past 100%.
+function contextLimit(model) {
+  if (!model) return DEFAULT_LIMIT;
+  if (MODEL_LIMITS[model]) return MODEL_LIMITS[model];
+  if (model.includes('opus')) return 1_000_000;
+  return DEFAULT_LIMIT;
+}
 const USAGE_ENDPOINT = 'https://api.anthropic.com/api/oauth/usage';
 const CACHE_FILE = join(homedir(), '.claude', 'oauth-usage-cache.json');
 const CACHE_TTL_MS = 90 * 1000;
@@ -31,12 +41,39 @@ function slugify(p) {
   return p.replace(/[^A-Za-z0-9]/g, '-');
 }
 
+// The weekly limit is now reported across several buckets
+// (seven_day, seven_day_opus, seven_day_sonnet, …). The figure the user
+// actually hits first is the highest of them, so take the max and use that
+// bucket's reset time (falling back to the overall seven_day reset).
+function pickWeekly(body) {
+  if (!body || typeof body !== 'object') return { percent: 0, resets_at: '' };
+  let percent = 0;
+  let resets_at = body?.seven_day?.resets_at ?? '';
+  for (const [key, val] of Object.entries(body)) {
+    if (!key.startsWith('seven_day')) continue;
+    const u = val && typeof val === 'object' ? val.utilization : null;
+    if (typeof u === 'number' && u > percent) {
+      percent = u;
+      resets_at = val.resets_at ?? resets_at;
+    }
+  }
+  return { percent: Math.floor(percent), resets_at };
+}
+
+function bucketPct(body, key) {
+  const u = body?.[key]?.utilization;
+  return typeof u === 'number' ? Math.floor(u) : 0;
+}
+
 function pickLimits(body) {
+  const weekly = pickWeekly(body);
   return {
     five_hour_percent: Math.floor(body?.five_hour?.utilization ?? 0),
-    seven_day_percent: Math.floor(body?.seven_day?.utilization ?? 0),
+    seven_day_percent: weekly.percent,
+    seven_day_sonnet_percent: bucketPct(body, 'seven_day_sonnet'),
+    seven_day_opus_percent: bucketPct(body, 'seven_day_opus'),
     five_hour_resets_at: body?.five_hour?.resets_at ?? '',
-    seven_day_resets_at: body?.seven_day?.resets_at ?? ''
+    seven_day_resets_at: weekly.resets_at
   };
 }
 
@@ -59,6 +96,8 @@ function limitsFromExisting(prev) {
     return {
       five_hour_percent: prev.five_hour_percent ?? 0,
       seven_day_percent: prev.seven_day_percent ?? 0,
+      seven_day_sonnet_percent: prev.seven_day_sonnet_percent ?? 0,
+      seven_day_opus_percent: prev.seven_day_opus_percent ?? 0,
       five_hour_resets_at: prev.five_hour_resets_at ?? '',
       seven_day_resets_at: prev.seven_day_resets_at ?? ''
     };
@@ -160,11 +199,13 @@ async function main() {
   const result = transcript ? await lastUsageAndModel(transcript) : { usage: null, model: null };
   const model = result.usage?.model ?? result.model ?? existing?.model ?? null;
   let ctx;
+  let ctxTokens;
   if (result.usage) {
-    const limit = MODEL_LIMITS[model] ?? DEFAULT_LIMIT;
-    ctx = Math.floor((result.usage.tokens * 100) / limit);
+    ctx = Math.floor((result.usage.tokens * 100) / contextLimit(model));
+    ctxTokens = result.usage.tokens;
   } else {
     ctx = existing?.context_percent ?? null;
+    ctxTokens = existing?.context_tokens ?? null;
   }
 
   const limits =
@@ -172,6 +213,8 @@ async function main() {
     limitsFromExisting(existing) ?? {
       five_hour_percent: 0,
       seven_day_percent: 0,
+      seven_day_sonnet_percent: 0,
+      seven_day_opus_percent: 0,
       five_hour_resets_at: '',
       seven_day_resets_at: ''
     };
@@ -184,6 +227,7 @@ async function main() {
   if (out) {
     writeJson(out, {
       context_percent: ctx,
+      context_tokens: ctxTokens,
       model,
       ...limits,
       session_id: sid,

@@ -257,13 +257,39 @@ function fmtPct(value) {
   return value == null || value === 0 ? '_' : `${value}%`;
 }
 
-function render(sessionData, limitsData) {
+function fmtTokens(value) {
+  if (value == null || value === 0) return '_';
+  if (value >= 1000) return `${Math.round(value / 1000)}k`;
+  return String(value);
+}
+
+const DEFAULT_FORMAT = 'S: %S% · %5hr%: %5h% · w: %w%';
+
+// Template tokens (wrapped in %…%):
+//   S/SP session context %        wS   weekly Sonnet %
+//   ST   session context tokens   wO   weekly Opus %
+//   5h   5-hour usage %           w    weekly % (max bucket)
+//   5hr  5-hour reset countdown   wr   weekly reset countdown
+// Unknown tokens are left untouched so typos are visible.
+function render(sessionData, limitsData, format) {
   const src = sessionData || limitsData;
   if (!src) return 'Claude: —';
   const limits = limitsData || sessionData || {};
-  const fiveLeft = formatRemaining(limits.five_hour_resets_at);
-  const fiveLabel = fiveLeft || '5h';
-  return `S: ${fmtPct(src.context_percent)} · ${fiveLabel}: ${fmtPct(limits.five_hour_percent)} · w: ${fmtPct(limits.seven_day_percent)}`;
+  const tokens = {
+    S: fmtPct(src.context_percent),
+    SP: fmtPct(src.context_percent),
+    ST: fmtTokens(src.context_tokens),
+    '5h': fmtPct(limits.five_hour_percent),
+    '5hr': formatRemaining(limits.five_hour_resets_at) || '5h',
+    w: fmtPct(limits.seven_day_percent),
+    wr: formatRemaining(limits.seven_day_resets_at) || '7d',
+    wS: fmtPct(limits.seven_day_sonnet_percent),
+    wO: fmtPct(limits.seven_day_opus_percent),
+  };
+  return (format || DEFAULT_FORMAT).replace(
+    /%([A-Za-z0-9]+)%/g,
+    (m, key) => (key in tokens ? tokens[key] : m)
+  );
 }
 
 function loadSessionTitles() {
@@ -362,7 +388,8 @@ function activate(context) {
     const sessionData = readUsage(sessionFile);
     const limitsData = limitsFile === sessionFile ? sessionData : readUsage(limitsFile);
     if (!sessionData && !limitsData) { item.hide(); return; }
-    item.text = render(sessionData, limitsData);
+    const format = vscode.workspace.getConfiguration('claudeUsage').get('format') || DEFAULT_FORMAT;
+    item.text = render(sessionData, limitsData, format);
     item.show();
     output.appendLine(`[update] ${reason}`);
   }
@@ -412,6 +439,9 @@ function activate(context) {
     vscode.window.tabGroups.onDidChangeTabGroups(update),
     vscode.window.onDidChangeActiveTextEditor(update),
     vscode.workspace.onDidChangeWorkspaceFolders(update),
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('claudeUsage.format')) update();
+    }),
 
     vscode.commands.registerCommand('claudeUsage.refresh', doRefresh),
 
