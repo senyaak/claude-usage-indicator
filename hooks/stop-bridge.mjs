@@ -9,6 +9,8 @@ import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 
 const MODEL_LIMITS = {
+  'claude-fable-5': 1_000_000,
+  'claude-mythos-5': 1_000_000,
   'claude-opus-4-8': 1_000_000,
   'claude-opus-4-7': 1_000_000,
   'claude-opus-4-5': 200_000,
@@ -18,13 +20,22 @@ const MODEL_LIMITS = {
 };
 const DEFAULT_LIMIT = 200_000;
 
-// Recent Opus models use the 1M context window here; fall back to that for
-// future opus-* releases so a model bump doesn't overflow past 100%.
+// Model ids arrive in several shapes: bare ("claude-opus-4-8"), date-pinned
+// ("claude-haiku-4-5-20251001"), or with a context-variant suffix
+// ("claude-opus-4-8[1m]"). Normalize, look up, then fall back by family so a
+// date bump or a new minor version of a known family doesn't reset to default.
 function contextLimit(model) {
   if (!model) return DEFAULT_LIMIT;
-  if (MODEL_LIMITS[model]) return MODEL_LIMITS[model];
-  if (model.includes('opus')) return 1_000_000;
-  return DEFAULT_LIMIT;
+  // A "[1m]"/"[200k]" variant suffix states the window directly.
+  const variant = /\[(\d+)\s*([mk])\]/i.exec(model);
+  if (variant) {
+    return Number(variant[1]) * (variant[2].toLowerCase() === 'm' ? 1_000_000 : 1_000);
+  }
+  // Strip bracketed suffixes and a trailing -YYYYMMDD date pin.
+  const base = model.replace(/\[[^\]]*\]/g, '').replace(/-\d{8}$/, '');
+  if (MODEL_LIMITS[base]) return MODEL_LIMITS[base];
+  if (/opus|fable|mythos/.test(base)) return 1_000_000;
+  return DEFAULT_LIMIT; // sonnet/haiku and unknown families default to 200k
 }
 const USAGE_ENDPOINT = 'https://api.anthropic.com/api/oauth/usage';
 const CACHE_FILE = join(homedir(), '.claude', 'oauth-usage-cache.json');
